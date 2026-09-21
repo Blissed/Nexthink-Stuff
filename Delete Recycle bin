@@ -1,0 +1,53 @@
+trap {
+    $host.ui.WriteErrorLine($_.ToString())
+    exit 1
+}
+
+# Function to calculate Recycle Bin size in MB
+function Get-RecycleBinSizeMB {
+    $size = 0
+    $path = "$env:SystemDrive\`$Recycle.Bin"
+
+    if (Test-Path $path) {
+        $items = Get-ChildItem -Path $path -Recurse -Force -ErrorAction SilentlyContinue
+        foreach ($item in $items) {
+            $size += $item.Length
+        }
+    }
+
+    return [math]::Round(($size / 1MB), 2)
+}
+
+# Get size before cleanup
+$sizeBefore = Get-RecycleBinSizeMB
+Write-Output "Recycle Bin size before cleanup: $sizeBefore MB"
+
+# If already empty, exit success
+if ($sizeBefore -eq 0) {
+    Write-Output "Recycle Bin already empty — nothing to clean."
+    exit 0
+}
+
+# Attempt to empty the Recycle Bin
+try {
+    Clear-RecycleBin -Force -ErrorAction Stop
+    Write-Output "Clear-RecycleBin completed successfully."
+}
+catch {
+    Write-Output "Warning: Clear-RecycleBin reported an error: $($_.Exception.Message)"
+    Write-Output "Checking actual bin size to confirm outcome..."
+}
+
+# Get size after cleanup
+$sizeAfter = Get-RecycleBinSizeMB
+Write-Output "Recycle Bin size after cleanup: $sizeAfter MB"
+
+# Size comparison is the final authority on success or failure
+if ($sizeAfter -lt $sizeBefore) {
+    Write-Output "SUCCESS: Recycle Bin cleared. Freed approximately $([math]::Round($sizeBefore - $sizeAfter, 2)) MB."
+    exit 0
+}
+else {
+    Write-Output "FAILED: Recycle Bin size did not decrease after cleanup attempt."
+    exit 1
+}
