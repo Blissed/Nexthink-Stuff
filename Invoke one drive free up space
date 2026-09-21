@@ -1,0 +1,92 @@
+#Requires -Version 5.1
+<#
+.SYNOPSIS
+    OneDrive Free Up Space - Files On-Demand
+.DESCRIPTION
+    Marks all locally synced OneDrive files as cloud-only (online-only),
+    freeing up local disk space using Windows Files On-Demand.
+    Reports free space before and after the operation.
+.NOTES
+    - Must run as the logged-in user (not SYSTEM) to access USERPROFILE
+    - Requires OneDrive sync client to be installed and configured
+    - Only reclaims space for files previously downloaded locally
+#>
+
+trap {
+    $host.ui.WriteErrorLine($_.ToString())
+    exit 1
+}
+
+# -------------------------------------------------------------------
+# Helper: Get free space on C: drive in MB
+# -------------------------------------------------------------------
+function Get-FreeSpaceMB {
+    $drive = Get-PSDrive -Name C -ErrorAction Stop
+    return [math]::Round(($drive.Free / 1MB), 2)
+}
+
+# -------------------------------------------------------------------
+# Step 1: Locate OneDrive folder
+# -------------------------------------------------------------------
+Write-Output "Locating OneDrive folder..."
+
+$oneDrivePath = (Get-ChildItem -Path "$env:USERPROFILE" -Directory -ErrorAction SilentlyContinue |
+                 Where-Object { $_.Name -like "OneDrive*" } |
+                 Select-Object -First 1).FullName
+
+if (-not $oneDrivePath) {
+    Write-Output "FAILED: OneDrive folder not found under $env:USERPROFILE."
+    exit 1
+}
+
+Write-Output "OneDrive folder detected: $oneDrivePath"
+
+# -------------------------------------------------------------------
+# Step 2: Verify OneDrive sync client is running
+# -------------------------------------------------------------------
+$oneDriveProcess = Get-Process -Name "OneDrive" -ErrorAction SilentlyContinue
+if (-not $oneDriveProcess) {
+    Write-Output "WARNING: OneDrive process is not running. Files On-Demand may not work correctly."
+}
+
+# -------------------------------------------------------------------
+# Step 3: Measure free space before cleanup
+# -------------------------------------------------------------------
+$freeBefore = Get-FreeSpaceMB
+Write-Output "Free space before: $freeBefore MB"
+
+# -------------------------------------------------------------------
+# Step 4: Mark all files as cloud-only (remove local content)
+# -------------------------------------------------------------------
+Write-Output "Running OneDrive Free Up Space (Files On-Demand)..."
+
+try {
+    $attribResult = & attrib.exe +U -P "$oneDrivePath\*" /S /D 2>&1
+    Write-Output "attrib.exe completed."
+    if ($attribResult) {
+        Write-Output "attrib.exe output: $attribResult"
+    }
+}
+catch {
+    Write-Output "ERROR running attrib.exe: $($_.Exception.Message)"
+}
+
+# -------------------------------------------------------------------
+# Step 5: Measure free space after cleanup
+# -------------------------------------------------------------------
+Start-Sleep -Seconds 5  # Allow file system to update
+$freeAfter = Get-FreeSpaceMB
+Write-Output "Free space after: $freeAfter MB"
+
+# -------------------------------------------------------------------
+# Step 6: Report results
+# -------------------------------------------------------------------
+if ($freeAfter -gt $freeBefore) {
+    $freed = [math]::Round(($freeAfter - $freeBefore), 2)
+    Write-Output "SUCCESS: OneDrive freed approximately $freed MB."
+    exit 0
+}
+else {
+    Write-Output "INFO: No additional free space detected. Files may already be cloud-only or were never downloaded locally."
+    exit 0
+}
