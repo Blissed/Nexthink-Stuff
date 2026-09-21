@@ -1,0 +1,18 @@
+trap {
+    $host.ui.WriteErrorLine($_.ToString())
+    exit 1
+}
+
+Write-Output "Attempting to restart the device..."
+
+try {
+    Restart-Computer -Force -ErrorAction Stop
+}
+catch {
+    Write-Output "FAILED: Restart-Computer encountered an error: $($_.Exception.Message)"
+    exit 1
+}
+
+# If the command succeeds, the machine will restart before reaching this line.
+Write-Output "SUCCESS: Restart command issued."
+exit 0
