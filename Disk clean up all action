@@ -1,0 +1,60 @@
+Add-Type -Path $env:NEXTHINK\RemoteActions\nxtremoteactions.dll
+
+trap {
+    $host.ui.WriteErrorLine($_.ToString())
+    exit 1
+}
+
+# Function to get free space on C: drive in MB
+function Get-FreeSpaceMB {
+    $drive = Get-PSDrive -Name C
+    return [math]::Round(($drive.Free / 1MB), 2)
+}
+
+Write-Output "Configuring Disk Cleanup sageset options..."
+
+# Enable ALL Disk Cleanup categories via registry (sageset:99)
+$regPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches"
+$entries = Get-ChildItem $regPath -ErrorAction SilentlyContinue
+
+foreach ($entry in $entries) {
+    try {
+        New-ItemProperty -Path $entry.PSPath -Name "StateFlags0099" -Value 2 -PropertyType DWORD -Force | Out-Null
+    } catch {
+        Write-Output "Warning: Could not set cleanup flag for $($entry.PSChildName)"
+    }
+}
+
+Write-Output "All Disk Cleanup categories enabled."
+
+# Capture free space before
+$freeBefore = Get-FreeSpaceMB
+Write-Output "Free space before cleanup: $freeBefore MB"
+
+# Run Disk Cleanup silently
+Write-Output "Running Disk Cleanup..."
+try {
+    Start-Process -FilePath "cleanmgr.exe" -ArgumentList "/sagerun:99" -Wait -ErrorAction Stop
+} catch {
+    Write-Output "Disk Cleanup encountered an error: $($_.Exception.Message)"
+}
+
+# Capture free space after
+$freeAfter = Get-FreeSpaceMB
+Write-Output "Free space after cleanup: $freeAfter MB"
+
+# Write outputs to Nexthink data layer
+[Nxt]::WriteOutputSize("FreeSpaceBeforeMB", [float]$freeBefore)
+[Nxt]::WriteOutputSize("FreeSpaceAfterMB", [float]$freeAfter)
+
+# Fail-safe comparison
+if ($freeAfter -gt $freeBefore) {
+    $freed = [math]::Round(($freeAfter - $freeBefore), 2)
+    Write-Output "SUCCESS: Disk Cleanup freed approximately $freed MB."
+    [Nxt]::WriteOutputString("CleanupResult", "Success - Freed $freed MB")
+    exit 0
+} else {
+    Write-Output "FAILED: Disk Cleanup did not free any disk space."
+    [Nxt]::WriteOutputString("CleanupResult", "Failed - No space freed")
+    exit 1
+}
