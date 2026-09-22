@@ -1,0 +1,174 @@
+#Requires -Version 5.1
+<#
+.SYNOPSIS
+    Backup Downloads folder to Desktop, then free up OneDrive space.
+.DESCRIPTION
+    1. Creates "Back Up Downloads" folder on the Desktop
+    2. Copies all Downloads folder contents into it
+    3. Deletes the Downloads folder
+    4. Triggers OneDrive "Free up space" via the Shell COM API
+.NOTES
+    - Must run as the logged-in user (not SYSTEM)
+    - Requires OneDrive sync client installed and running
+    - Requires Windows 10/11 with Files On-Demand enabled
+#>
+
+trap {
+    $host.ui.WriteErrorLine($_.ToString())
+    exit 1
+}
+
+# -------------------------------------------------------------------
+# Helper: Get free space on C: drive in MB
+# -------------------------------------------------------------------
+function Get-FreeSpaceMB {
+    $drive = Get-PSDrive -Name C -ErrorAction Stop
+    return [math]::Round(($drive.Free / 1MB), 2)
+}
+
+# -------------------------------------------------------------------
+# PART 1: Backup Downloads and clean up
+# -------------------------------------------------------------------
+
+$downloadsPath = [System.IO.Path]::Combine($env:USERPROFILE, "Downloads")
+$desktopPath   = [System.Environment]::GetFolderPath("Desktop")
+$backupPath    = [System.IO.Path]::Combine($desktopPath, "Back Up Downloads")
+
+Write-Output "=== Step 1: Create backup folder on Desktop ==="
+
+if (-not (Test-Path $backupPath)) {
+    New-Item -ItemType Directory -Path $backupPath -Force | Out-Null
+    Write-Output "Created folder: $backupPath"
+} else {
+    Write-Output "Folder already exists: $backupPath"
+}
+
+Write-Output "=== Step 2: Copy Downloads contents to backup folder ==="
+
+if (-not (Test-Path $downloadsPath)) {
+    Write-Output "FAILED: Downloads folder not found at $downloadsPath"
+    exit 1
+}
+
+$items = Get-ChildItem -Path $downloadsPath -Force -ErrorAction SilentlyContinue
+
+if ($items.Count -eq 0) {
+    Write-Output "Downloads folder is empty — nothing to copy."
+} else {
+    Copy-Item -Path "$downloadsPath\*" -Destination $backupPath -Recurse -Force -ErrorAction Stop
+    Write-Output "Copied $($items.Count) item(s) to $backupPath"
+}
+
+Write-Output "=== Step 3: Delete Downloads folder ==="
+
+Remove-Item -Path $downloadsPath -Recurse -Force -ErrorAction Stop
+Write-Output "Deleted: $downloadsPath"
+
+# -------------------------------------------------------------------
+# PART 2: OneDrive Free Up Space
+# -------------------------------------------------------------------
+
+Write-Output "=== Step 4: OneDrive Free Up Space ==="
+
+Write-Output "Checking OneDrive sync client..."
+
+$oneDriveExe = "$env:LOCALAPPDATA\Microsoft\OneDrive\OneDrive.exe"
+
+if (-not (Test-Path $oneDriveExe)) {
+    Write-Output "FAILED: OneDrive client not found at $oneDriveExe"
+    exit 1
+}
+
+$oneDriveProcess = Get-Process -Name "OneDrive" -ErrorAction SilentlyContinue
+if (-not $oneDriveProcess) {
+    Write-Output "OneDrive not running. Starting it now..."
+    Start-Process $oneDriveExe
+    Start-Sleep -Seconds 15
+    Write-Output "OneDrive started."
+} else {
+    Write-Output "OneDrive is running."
+}
+
+Write-Output "Locating OneDrive folder..."
+
+$oneDrivePath = (Get-ItemProperty -Path "HKCU:\Software\Microsoft\OneDrive\Accounts\Business1" `
+                 -Name "UserFolder" -ErrorAction SilentlyContinue).UserFolder
+
+if (-not $oneDrivePath) {
+    $oneDrivePath = (Get-ItemProperty -Path "HKCU:\Software\Microsoft\OneDrive" `
+                     -Name "UserFolder" -ErrorAction SilentlyContinue).UserFolder
+}
+
+if (-not $oneDrivePath) {
+    $oneDrivePath = (Get-ChildItem -Path "$env:USERPROFILE" -Directory -ErrorAction SilentlyContinue |
+                     Where-Object { $_.Name -like "OneDrive*" } |
+                     Select-Object -First 1).FullName
+}
+
+if (-not $oneDrivePath -or -not (Test-Path $oneDrivePath)) {
+    Write-Output "FAILED: Could not locate OneDrive folder."
+    exit 1
+}
+
+Write-Output "OneDrive folder: $oneDrivePath"
+
+Write-Output "Checking Files On-Demand status..."
+
+$fodEnabled = (Get-ItemProperty -Path "HKCU:\Software\Microsoft\OneDrive" `
+               -Name "FilesOnDemandEnabled" -ErrorAction SilentlyContinue).FilesOnDemandEnabled
+
+if ($fodEnabled -ne 1) {
+    Write-Output "FAILED: Files On-Demand is not enabled. Please enable it in OneDrive Settings > Sync and backup."
+    exit 1
+}
+
+Write-Output "Files On-Demand is enabled."
+
+# -------------------------------------------------------------------
+# Step 4a: Record free space before
+# -------------------------------------------------------------------
+$freeSpaceBefore = Get-FreeSpaceMB
+Write-Output "Free space before: $freeSpaceBefore MB"
+
+# -------------------------------------------------------------------
+# Step 4b: Dehydrate all OneDrive files via Shell COM API
+# -------------------------------------------------------------------
+Write-Output "Dehydrating OneDrive files (Free up space)..."
+
+try {
+    $shell = New-Object -ComObject Shell.Application
+    $folder = $shell.Namespace($oneDrivePath)
+
+    if (-not $folder) {
+        Write-Output "FAILED: Could not open OneDrive folder via Shell COM."
+        exit 1
+    }
+
+    $files = $folder.Items()
+    $count = 0
+
+    foreach ($item in $files) {
+        try {
+            $item.InvokeVerb("Free up space")
+            $count++
+        } catch {
+            # Some items may not support the verb — skip silently
+        }
+    }
+
+    Write-Output "Processed $count item(s) for dehydration."
+} catch {
+    Write-Output "FAILED during Shell COM dehydration: $_"
+    exit 1
+}
+
+# -------------------------------------------------------------------
+# Step 4c: Record free space after
+# -------------------------------------------------------------------
+Start-Sleep -Seconds 5
+$freeSpaceAfter = Get-FreeSpaceMB
+$freedMB = [math]::Round($freeSpaceAfter - $freeSpaceBefore, 2)
+
+Write-Output "Free space after:  $freeSpaceAfter MB"
+Write-Output "Space freed:       $freedMB MB"
+Write-Output "=== Complete ==="
