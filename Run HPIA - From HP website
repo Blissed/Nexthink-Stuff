@@ -1,0 +1,119 @@
+# ============================================================
+# Nexthink Remote Action – Invoke HP Image Assistant (HPIA)
+# Purpose: Remediation / Data Collection
+# Target OS: Windows (HP devices only)
+# ============================================================
+
+Add-Type -Path $env:NEXTHINK\RemoteActions\nxtremoteactions.dll
+
+# ── Configuration ────────────────────────────────────────────
+$HPIAInstallPath  = "C:\SWSetup\HPIA\HPImageAssistant.exe"
+$ReportFolder     = "C:\ProgramData\HP\HPIA\Reports"
+$LogFile          = "C:\ProgramData\HP\HPIA\HPIA_NXT.log"
+
+# Set to $true to analyze AND install recommendations.
+# Set to $false to analyze only (no changes made to the device).
+$InstallUpdates   = $false
+
+# ── Helper: Write to log ─────────────────────────────────────
+function Write-Log {
+    param([string]$Message)
+    $timestamp = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+    "$timestamp  $Message" | Out-File -FilePath $LogFile -Append -Encoding UTF8
+}
+
+# ── Step 1: Verify this is an HP device ──────────────────────
+$manufacturer = (Get-WmiObject -Class Win32_ComputerSystem).Manufacturer
+if ($manufacturer -notlike "*HP*" -and $manufacturer -notlike "*Hewlett*") {
+    Write-Log "Non-HP device detected ($manufacturer). Exiting."
+    [Nxt]::WriteOutputString("Status", "Skipped – Not an HP device")
+    [Nxt]::WriteOutputString("Recommendations", "N/A")
+    exit 0
+}
+
+# ── Step 2: Install HPIA if not present ──────────────────────
+if (-not (Test-Path $HPIAInstallPath)) {
+    Write-Log "HPIA not found. Attempting install via HP CMSL..."
+    try {
+        # Requires HP Client Management Script Library (CMSL) to be present.
+        # If CMSL is not available in your environment, replace this block
+        # with a direct download from your internal software repository.
+        Install-HPImageAssistant -ErrorAction Stop
+        Write-Log "HPIA installed successfully."
+    }
+    catch {
+        Write-Log "HPIA install failed: $_"
+        [Nxt]::WriteOutputString("Status", "Failed – HPIA could not be installed")
+        [Nxt]::WriteOutputString("Recommendations", "N/A")
+        exit 1
+    }
+}
+
+# ── Step 3: Create report output folder ──────────────────────
+if (-not (Test-Path $ReportFolder)) {
+    New-Item -ItemType Directory -Path $ReportFolder -Force | Out-Null
+}
+
+# ── Step 4: Build HPIA arguments ─────────────────────────────
+if ($InstallUpdates) {
+    $HPIAArgs = "/Operation:Analyze /Action:Install /Silent /ReportFolder:`"$ReportFolder`" /Category:All"
+    Write-Log "Running HPIA in Analyze + Install mode."
+} else {
+    $HPIAArgs = "/Operation:Analyze /Action:List /Silent /ReportFolder:`"$ReportFolder`""
+    Write-Log "Running HPIA in Analyze-only mode."
+}
+
+# ── Step 5: Execute HPIA ──────────────────────────────────────
+try {
+    $process = Start-Process -FilePath $HPIAInstallPath `
+                             -ArgumentList $HPIAArgs `
+                             -Wait -PassThru -NoNewWindow
+    $exitCode = $process.ExitCode
+    Write-Log "HPIA completed with exit code: $exitCode"
+}
+catch {
+    Write-Log "HPIA execution error: $_"
+    [Nxt]::WriteOutputString("Status", "Failed – HPIA execution error")
+    [Nxt]::WriteOutputString("Recommendations", "N/A")
+    exit 1
+}
+
+# ── Step 6: Parse the XML report ─────────────────────────────
+# HPIA exit codes: 0 = up to date, 1 = recommendations found,
+#                  2 = error, 3 = not supported platform
+$statusMap = @{
+    0 = "Up to date – No recommendations"
+    1 = "Recommendations found"
+    2 = "HPIA error during analysis"
+    3 = "Platform not supported by HPIA"
+}
+$statusText = if ($statusMap.ContainsKey($exitCode)) { $statusMap[$exitCode] } else { "Unknown exit code: $exitCode" }
+
+$recommendationsSummary = "None"
+try {
+    $xmlReport = Get-ChildItem -Path $ReportFolder -Filter "*.xml" |
+                 Sort-Object LastWriteTime -Descending |
+                 Select-Object -First 1
+
+    if ($xmlReport) {
+        [xml]$reportContent = Get-Content $xmlReport.FullName
+        $items = $reportContent.SelectNodes("//Recommendation")
+        if ($items.Count -gt 0) {
+            $recommendationsSummary = ($items | ForEach-Object {
+                "$($_.Name) [$($_.Category)] – $($_.Status)"
+            }) -join " | "
+        }
+        Write-Log "Report parsed: $($items.Count) recommendation(s) found."
+    }
+}
+catch {
+    Write-Log "Could not parse HPIA XML report: $_"
+    $recommendationsSummary = "Report parse error – check log"
+}
+
+# ── Step 7: Write outputs back to Nexthink ───────────────────
+[Nxt]::WriteOutputString("Status", $statusText)
+[Nxt]::WriteOutputString("Recommendations", $recommendationsSummary)
+
+Write-Log "Remote action complete."
+exit 0
