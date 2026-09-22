@@ -1,0 +1,31 @@
+C:\Windows\ccmsetup\ccmsetup.exe
+This is the SCCM client setup executable that gets cached locally during the original installation. Running it with the /repair switch triggers a self-repair using that local cache:
+
+& "C:\Windows\ccmsetup\ccmsetup.exe" /repair
+Here's an updated script that checks both locations — the local installer cache first, then falls back to ccmrepair.exe:
+
+# SCCM Client Repair - Checks local installer cache first, then CCM repair
+# Intended for use as a Nexthink Remote Action
+
+$CCMSetupPath = "C:\Windows\ccmsetup\ccmsetup.exe"
+$CCMRepairPath = "C:\Windows\CCM\ccmrepair.exe"
+
+if (Test-Path $CCMSetupPath) {
+    try {
+        Write-Output "Found ccmsetup.exe - running repair via local installer cache."
+        Start-Process -FilePath $CCMSetupPath -ArgumentList "/repair" -Wait -NoNewWindow
+        Write-Output "ccmsetup /repair completed successfully."
+    } catch {
+        Write-Output "ccmsetup /repair failed: $_"
+    }
+} elseif (Test-Path $CCMRepairPath) {
+    try {
+        Write-Output "ccmsetup.exe not found - falling back to ccmrepair.exe."
+        Start-Process -FilePath $CCMRepairPath -Wait -NoNewWindow
+        Write-Output "ccmrepair.exe completed successfully."
+    } catch {
+        Write-Output "ccmrepair.exe failed: $_"
+    }
+} else {
+    Write-Output "Neither ccmsetup.exe nor ccmrepair.exe found. SCCM client may need a full reinstall."
+}
